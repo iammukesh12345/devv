@@ -1,0 +1,431 @@
+Developer
+   ↓
+GitHub
+   ↓
+Jenkins (EC2)
+   ↓
+Maven Build
+   ↓
+SonarQube
+   ↓
+Nexus (Artifact Upload)
+   ↓
+Docker Image
+   ↓
+Trivy Scan
+   ↓
+Amazon ECR
+   ↓
+AWS EKS
+   ↓
+ALB Ingress + ACM SSL
+   ↓
+Users (HTTPS)
+
+
+1️⃣ AWS Prerequisites (Mention in README)
+
+✔ VPC (public + private subnets)
+✔ EKS cluster (managed nodes)
+✔ IAM Roles (EKS, Jenkins, ECR)
+✔ Amazon ECR repository
+✔ ACM SSL certificate
+✔ ALB Ingress Controller
+
+2️⃣ Updated Project Structure
+devops-eks-project/
+│
+├── app/
+│   └── pom.xml
+│
+├── docker/
+│   └── Dockerfile
+│
+├── jenkins/
+│   └── Jenkinsfile
+│
+├── k8s/
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   ├── ingress.yaml
+│
+├── nexus/
+│   └── settings.xml
+│
+└── README.md
+
+
+3️⃣ Nexus Artifact Upload
+nexus/settings.xml
+<settings>
+  <servers>
+    <server>
+      <id>nexus</id>
+      <username>admin</username>
+      <password>nexus-password</password>
+    </server>
+  </servers>
+</settings>
+
+
+4️⃣ Dockerfile 
+FROM openjdk:11-jre-slim
+WORKDIR /app
+COPY target/devops-app-1.0.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java","-jar","app.jar"]
+
+
+5️⃣ AWS ECR Image Push
+Create ECR repo:
+
+aws ecr create-repository --repository-name devops-app
+
+ECR Image format:
+ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/devops-app:latest
+
+
+6️⃣ Jenkinsfile (FULL – Production Level)
+jenkins/Jenkinsfile
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION = "ap-south-1"
+    ECR_REPO = "123456789.dkr.ecr.ap-south-1.amazonaws.com/devops-app"
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        git branch: 'main', url: 'https://github.com/yourname/devops-eks-project.git'
+      }
+    }
+
+    stage('Build & Test') {
+      steps {
+        sh 'mvn clean package'
+      }
+    }
+
+    stage('SonarQube') {
+      steps {
+        withSonarQubeEnv('sonarqube') {
+          sh 'mvn sonar:sonar'
+        }
+      }
+    }
+
+    stage('Upload Artifact to Nexus') {
+      steps {
+        sh 'mvn deploy -s nexus/settings.xml'
+      }
+    }
+
+    stage('Docker Build') {
+      steps {
+        sh 'docker build -t devops-app .'
+      }
+    }
+
+    stage('Trivy Scan') {
+      steps {
+        sh 'trivy image devops-app'
+      }
+    }
+
+    stage('Push Image to ECR') {
+      steps {
+        sh '''
+        aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO
+        docker tag devops-app:latest $ECR_REPO:latest
+        docker push $ECR_REPO:latest
+        '''
+      }
+    }
+
+    stage('Deploy to EKS') {
+      steps {
+        sh '''
+        kubectl apply -f k8s/
+        '''
+      }
+    }
+  }
+}
+
+
+7️⃣ Kubernetes Deployment (EKS)
+k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devops-app
+  template:
+    metadata:
+      labels:
+        app: devops-app
+    spec:
+      containers:
+      - name: app
+        image: 123456789.dkr.ecr.ap-south-1.amazonaws.com/devops-app:latest
+        ports:
+        - containerPort: 8080
+
+k8s/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: devops-service
+spec:
+  type: NodePort
+  selector:
+    app: devops-app
+  ports:
+  - port: 80
+    targetPort: 8080
+
+
+8️⃣ Ingress + SSL (AWS ALB)
+Prerequisites
+
+✔ Install AWS Load Balancer Controller
+✔ SSL certificate from ACM
+
+k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devops-ingress
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-1:123456789:certificate/xxxx
+spec:
+  rules:
+  - host: devops.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: devops-service
+            port:
+              number: 80
+
+
+✅ HTTPS enabled
+✅ SSL termination via ACM
+✅ Production-grade ALB
+
+
+
+Kubernetes Auto-Scaling on AWS EKS
+(HPA + Cluster Autoscaler)
+
+You’ll achieve two-level scaling:
+
+Layer	Scales What	Tool
+Pod level	Pods inside a Deployment	HPA
+Node level	EC2 worker nodes	Cluster Autoscaler (CA)
+1️⃣ Prerequisites (Must Mention)
+
+✔ EKS cluster
+✔ Metrics Server installed
+✔ Managed Node Group (ASG based)
+✔ IAM OIDC provider enabled
+
+2️⃣ Install Metrics Server (Required for HPA)
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+
+Verify:
+
+kubectl top pods
+kubectl top nodes
+
+3️⃣ Update Deployment (CPU Requests Required)
+k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devops-app
+  template:
+    metadata:
+      labels:
+        app: devops-app
+    spec:
+      containers:
+      - name: app
+        image: 123456789.dkr.ecr.ap-south-1.amazonaws.com/devops-app:latest
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+
+📌 Without requests, HPA will NOT work
+
+4️⃣ Horizontal Pod Autoscaler (HPA)
+k8s/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: devops-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: devops-app
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+
+Apply:
+
+kubectl apply -f k8s/hpa.yaml
+
+
+Check:
+
+kubectl get hpa
+
+5️⃣ Test HPA (Optional but Good)
+kubectl run load-test --rm -it --image=busybox -- sh
+while true; do wget -q -O- http://devops-service; done
+
+
+Result:
+✔ Pods scale up
+✔ CPU threshold reached
+
+6️⃣ Cluster Autoscaler (CA) on AWS EKS
+Step 1: IAM Policy for CA
+
+Attach this policy to node group IAM role:
+
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeAutoScalingInstances",
+        "autoscaling:DescribeLaunchConfigurations",
+        "autoscaling:DescribeTags",
+        "autoscaling:SetDesiredCapacity",
+        "autoscaling:TerminateInstanceInAutoScalingGroup"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+
+Step 2: Deploy Cluster Autoscaler
+k8s/cluster-autoscaler.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      serviceAccountName: cluster-autoscaler
+      containers:
+      - image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.28.0
+        name: cluster-autoscaler
+        command:
+        - ./cluster-autoscaler
+        - --cloud-provider=aws
+        - --nodes=2:10:eks-nodegroup-name
+        - --skip-nodes-with-local-storage=false
+        - --expander=least-waste
+
+
+⚠ Replace:
+
+eks-nodegroup-name
+
+
+Apply:
+
+kubectl apply -f k8s/cluster-autoscaler.yaml
+
+7️⃣ How HPA + CA Work Together (Explain This)
+Flow:
+
+Traffic increases
+
+CPU usage crosses 70%
+
+HPA adds more pods
+
+Pods can’t be scheduled
+
+Cluster Autoscaler adds EC2 nodes
+
+New pods get scheduled
+
+Traffic decreases → scale down
+
+8️⃣ Verification Commands (Interview Ready)
+kubectl get hpa
+kubectl describe hpa devops-app-hpa
+kubectl get nodes
+kubectl logs -n kube-system deployment/cluster-autoscaler
+
+
+
+
+9️⃣ README (Resume-Ready)
+## AWS EKS Corporate DevOps Project
+
+### Tools & Technologies
+AWS (EKS, ECR, IAM, VPC, ACM), Jenkins, Maven, Docker, Nexus,
+SonarQube, Trivy, Kubernetes, Prometheus, Grafana
+
+### Key Highlights
+- CI/CD pipeline with Jenkins
+- Artifact management using Nexus
+- Container security scanning with Trivy
+- Docker image stored in Amazon ECR
+- Application deployed on AWS EKS
+- ALB Ingress with SSL using ACM
+- Monitoring with Prometheus & Grafana
